@@ -1,129 +1,171 @@
-import torch.nn as nn
-import math
-import torch.utils.model_zoo as model_zoo
-import torch.nn.functional as F
-
-def conv1x1(in_planes,out_planes,stride=1):
-    return nn.Conv2d(in_planes,out_planes,kernel_size =1,stride =stride,bias=False)
-def conv3x3(in_planes, out_planes, stride=1):
-    "3x3 convolution with padding"
-    return nn.Conv2d(in_planes, out_planes, kernel_size=3, stride=stride,
-                     padding=1, bias=False)
+from keras import layers
+from keras.layers import Conv2D, BatchNormalization, Activation, Permute, TimeDistributed, Dense, Dropout
+from keras.layers import Convolution2D, Flatten
+import keras.backend as K
 
 
-class BasicBlock(nn.Module):
-    expansion = 1
+def identity_block(input_tensor, kernel_size, filters, stage, block, dilation_rate=(1, 1)):
+    """The identity block is the block that has no conv layer at shortcut.
 
-    def __init__(self, inplanes, planes, stride=1, downsample=None):
-        super(BasicBlock, self).__init__()
-        self.conv1 = conv1x1(inplanes, planes)
-        self.bn1 = nn.BatchNorm2d(planes)
-        self.relu = nn.ReLU(inplace=True)
-        self.conv2 = conv3x3(planes, planes, stride)
-        self.bn2 = nn.BatchNorm2d(planes)
-        self.downsample = downsample
-        self.stride = stride
+    # Arguments
+        input_tensor: input tensor
+        kernel_size: default 3, the kernel size of middle conv layer at main path
+        filters: list of integers, the filters of 3 conv layer at main path
+        stage: integer, current stage label, used for generating layer names
+        block: 'a','b'..., current block label, used for generating layer names
 
-    def forward(self, x):
-        residual = x
+    # Returns
+        Output tensor for the block.
+    """
+    filters1, filters2, filters3 = filters
+    if K.image_data_format() == 'channels_last':
+        bn_axis = 3
+    else:
+        bn_axis = 1
+    conv_name_base = 'res' + str(stage) + block + '_branch'
+    bn_name_base = 'bn' + str(stage) + block + '_branch'
 
-        out = self.conv1(x)
-        out = self.bn1(out)
-        out = self.relu(out)
+    x = Conv2D(filters1, (1, 1), name=conv_name_base + '2a')(input_tensor)
+    x = BatchNormalization(axis=bn_axis, name=bn_name_base + '2a')(x)
+    x = Activation('relu')(x)
 
-        out = self.conv2(out)
-        out = self.bn2(out)
+    x = Conv2D(filters2, kernel_size, dilation_rate=dilation_rate,
+               padding='same', name=conv_name_base + '2b')(x)
+    x = BatchNormalization(axis=bn_axis, name=bn_name_base + '2b')(x)
+    x = Activation('relu')(x)
 
-        if self.downsample is not None:
-            residual = self.downsample(x)
+    x = Conv2D(filters3, (1, 1), name=conv_name_base + '2c')(x)
+    x = BatchNormalization(axis=bn_axis, name=bn_name_base + '2c')(x)
 
-        out += residual
-        out = self.relu(out)
+    x = layers.add([x, input_tensor])
+    x = Activation('relu')(x)
+    return x
 
-        return out
 
-class ResNet(nn.Module):
+def conv_block(input_tensor, kernel_size, filters, stage, block, strides=(2, 2)):
+    """A block that has a conv layer at shortcut.
 
-    def __init__(self, block, layers, strides, compress_layer=True):
-        self.inplanes = 32
-        super(ResNet, self).__init__()
-        self.conv1 = nn.Conv2d(1, 32, kernel_size=3, stride=strides[0], padding=1,
-                               bias=False)
-        self.bn1 = nn.BatchNorm2d(32)
-        self.relu = nn.ReLU(inplace=True)
+    # Arguments
+        input_tensor: input tensor
+        kernel_size: default 3, the kernel size of middle conv layer at main path
+        filters: list of integers, the filters of 3 conv layer at main path
+        stage: integer, current stage label, used for generating layer names
+        block: 'a','b'..., current block label, used for generating layer names
+        strides: Strides for the first conv layer in the block.
 
-        self.layer1 = self._make_layer(block, 32, layers[0],stride=strides[1])
-        self.layer2 = self._make_layer(block, 64, layers[1], stride=strides[2])
-        self.layer3 = self._make_layer(block, 128, layers[2], stride=strides[3])
-        self.layer4 = self._make_layer(block, 256, layers[3], stride=strides[4])        
-        self.layer5 = self._make_layer(block, 512, layers[4], stride=strides[5])
+    # Returns
+        Output tensor for the block.
 
-        self.compress_layer = compress_layer        
-        if compress_layer:
-            # for handwritten
-            self.layer6 = nn.Sequential(
-                nn.Conv2d(512, 256, kernel_size=(3, 1), padding=(0, 0), stride=(1, 1)),
-                nn.BatchNorm2d(256),
-                nn.ReLU(inplace = True))
+    Note that from stage 3,
+    the first conv layer at main path is with strides=(2, 2)
+    And the shortcut should have strides=(2, 2) as well
+    """
+    filters1, filters2, filters3 = filters
+    if K.image_data_format() == 'channels_last':
+        bn_axis = 3
+    else:
+        bn_axis = 1
+    conv_name_base = 'res' + str(stage) + block + '_branch'
+    bn_name_base = 'bn' + str(stage) + block + '_branch'
 
-        for m in self.modules():
-            if isinstance(m, nn.Conv2d):
-                n = m.kernel_size[0] * m.kernel_size[1] * m.out_channels
-                m.weight.data.normal_(0, math.sqrt(2. / n))
-            elif isinstance(m, nn.BatchNorm2d):
-                m.weight.data.fill_(1)
-                m.bias.data.zero_()
+    x = Conv2D(filters1, (1, 1), strides=strides, padding='same',
+               name=conv_name_base + '2a')(input_tensor)
+    x = BatchNormalization(axis=bn_axis, name=bn_name_base + '2a')(x)
+    x = Activation('relu')(x)
 
-    def _make_layer(self, block, planes, blocks, stride=1):
-        downsample = None
-        if stride != 1 or self.inplanes != planes * block.expansion:
-            downsample = nn.Sequential(
-                nn.Conv2d(self.inplanes, planes * block.expansion,
-                          kernel_size=1, stride=stride, bias=False),
-                nn.BatchNorm2d(planes * block.expansion),
-            )
+    x = Conv2D(filters2, kernel_size, padding='same',
+               name=conv_name_base + '2b')(x)
+    x = BatchNormalization(axis=bn_axis, name=bn_name_base + '2b')(x)
+    x = Activation('relu')(x)
 
-        layers = []
-        layers.append(block(self.inplanes, planes, stride, downsample))
-        self.inplanes = planes * block.expansion
-        for i in range(1, blocks):
-            layers.append(block(self.inplanes, planes))
+    x = Conv2D(filters3, (1, 1), padding='same', name=conv_name_base + '2c')(x)
+    x = BatchNormalization(axis=bn_axis, name=bn_name_base + '2c')(x)
 
-        return nn.Sequential(*layers)
+    shortcut = Conv2D(filters3, (1, 1), strides=strides, padding='same',
+                      name=conv_name_base + '1')(input_tensor)
+    shortcut = BatchNormalization(axis=bn_axis, name=bn_name_base + '1')(shortcut)
 
-    def forward(self, x, multiscale = False):
-        out_features = []
-        x = self.conv1(x)
-        x = self.bn1(x)
-        x = self.relu(x)
-        tmp_shape = x.size()[2:]
-        x = self.layer1(x)
-        if x.size()[2:] != tmp_shape:
-            tmp_shape = x.size()[2:]
-            out_features.append(x)
-        x = self.layer2(x)
-        if x.size()[2:] != tmp_shape:
-            tmp_shape = x.size()[2:]
-            out_features.append(x)
-        x = self.layer3(x)
-        if x.size()[2:] != tmp_shape:
-            tmp_shape = x.size()[2:]
-            out_features.append(x)
-        x = self.layer4(x)
-        if x.size()[2:] != tmp_shape:
-            tmp_shape = x.size()[2:]
-            out_features.append(x)
-        x = self.layer5(x)
-        if not self.compress_layer:
-            out_features.append(x)
-        else:
-            if x.size()[2:] != tmp_shape:
-                tmp_shape = x.size()[2:]
-                out_features.append(x)
-            x = self.layer6(x)
-            out_features.append(x)
-        return out_features
+    x = layers.add([x, shortcut])
+    x = Activation('relu')(x)
+    return x
 
-def resnet45(strides, compress_layer):
-    model = ResNet(BasicBlock, [3, 4, 6, 6, 3], strides, compress_layer)
-    return model
+
+def res_block(input_tensor, kernel_size, filters, stage, block, dilation_rate=(1, 1), strides=(1, 1), is_cut=False):
+    if K.image_data_format() == 'channels_last':
+        bn_axis = 3
+    else:
+        bn_axis = 1
+    conv_name_base = 'res' + str(stage) + block + '_branch'
+    bn_name_base = 'bn' + str(stage) + block + '_branch'
+
+    x = Conv2D(filters[0], kernel_size, strides=strides, padding='same', name=conv_name_base + '2a')(input_tensor)
+    x = BatchNormalization(axis=bn_axis, name=bn_name_base + '2a')(x)
+    x = Activation('relu')(x)
+
+    x = Conv2D(filters[1], kernel_size, dilation_rate=dilation_rate,
+               padding='same', name=conv_name_base + '2b')(x)
+    x = BatchNormalization(axis=bn_axis, name=bn_name_base + '2b')(x)
+
+    if len(filters) > 2:
+        x = Activation('relu')(x)
+        x = Conv2D(filters[2], kernel_size, padding='same', name=conv_name_base + '2c')(x)
+        x = BatchNormalization(axis=bn_axis, name=bn_name_base + '2c')(x)
+
+    if is_cut:
+        shortcut = Conv2D(filters[-1], (1, 1), strides=strides, padding='same',
+                          name=conv_name_base + '1')(input_tensor)
+        shortcut = BatchNormalization(axis=bn_axis, name=bn_name_base + '1')(shortcut)
+    else:
+        shortcut = input_tensor
+
+    x = layers.add([x, shortcut])
+    x = Activation('relu')(x)
+    return x
+
+
+def ResNet50(input_data, n_class):
+    if K.image_data_format() == 'channels_last':
+        bn_axis = 3
+    else:
+        bn_axis = 1
+
+    x = Convolution2D(64, (3, 3), strides=(1, 1), kernel_initializer='he_normal', padding='same',
+                      activation='relu')(input_data)
+    x = Convolution2D(64, (3, 3), strides=(2, 2), kernel_initializer='he_normal', padding='same')(x)
+    x = BatchNormalization(axis=bn_axis)(x)
+    x = Activation('relu')(x)
+
+    x = conv_block(x, 3, [64, 64, 256], stage=2, block='a', strides=(1, 1))
+    x = identity_block(x, 3, [64, 64, 256], stage=2, block='b')
+    x = identity_block(x, 3, [64, 64, 256], stage=2, block='c')
+
+    x = conv_block(x, 3, [128, 128, 512], stage=3, block='a', strides =(2, 2))
+    x = identity_block(x, 3, [128, 128, 512], stage=3, block='b')
+    x = identity_block(x, 3, [128, 128, 512], stage=3, block='c')
+    x = identity_block(x, 3, [128, 128, 512], stage=3, block='d')
+
+    x = conv_block(x, 3, [256, 256, 1024], stage=4, block='a', strides=(2, 1))
+    x = identity_block(x, 3, [256, 256, 1024], stage=4, block='b')
+    x = identity_block(x, 3, [256, 256, 1024], stage=4, block='c')
+    x = identity_block(x, 3, [256, 256, 1024], stage=4, block='d')
+    x = identity_block(x, 3, [256, 256, 1024], stage=4, block='e')
+    x = identity_block(x, 3, [256, 256, 1024], stage=4, block='f')
+
+    x = conv_block(x, 3, [512, 512, 2048], stage=5, block='a', strides=(2, 1))
+    x = identity_block(x, 3, [512, 512, 2048], stage=5, block='b')
+    x = identity_block(x, 3, [512, 512, 2048], stage=5, block='c')
+
+    x = Activation('relu')(x)
+    x = BatchNormalization(axis=-1, epsilon=1.1e-5)(x)
+
+    x = Permute((2, 1, 3), name='permute')(x)
+    x = TimeDistributed(Flatten(), name='flatten')(x)
+    x = TimeDistributed(Dense(n_class))(Dropout(rate=0.2)(x))
+    y_pred = Activation(activation='softmax')(x)
+
+    return y_pred
+
+
+
+if __name__ == '__main__':
+    pass
