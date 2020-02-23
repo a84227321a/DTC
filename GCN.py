@@ -1,146 +1,100 @@
-import numpy as np
+from __future__ import print_function
 
-import tensorflow as tf
+from keras import activations, initializers, constraints
+from keras import regularizers
+from keras.engine import Layer
+import keras.backend as K
 
-
-_LAYER_UIDS = {}
-def get_layer_uid(layer_name=''):
-    """Helper function, assigns unique layer IDs."""
-    if layer_name not in _LAYER_UIDS:
-        _LAYER_UIDS[layer_name] = 1
-        return 1
-    else:
-        _LAYER_UIDS[layer_name] += 1
-        return _LAYER_UIDS[layer_name]
-
-class Layer(object):
-    """Base layer class. Defines basic API for all layer objects.
-    Implementation inspired by keras (http://keras.io).
-    # Properties
-        name: String, defines the variable scope of the layer.
-        logging: Boolean, switches Tensorflow histogram logging on/off
-    # Methods
-        _call(inputs): Defines computation graph of layer
-            (i.e. takes input, returns output)
-        __call__(inputs): Wrapper for _call()
-        _log_vars(): Log all variables
-    """
-
-    def __init__(self, **kwargs):
-        allowed_kwargs = {'name', 'logging'}
-        for kwarg in kwargs.keys():
-            assert kwarg in allowed_kwargs, 'Invalid keyword argument: ' + kwarg
-        name = kwargs.get('name')
-        if not name:
-            layer = self.__class__.__name__.lower()
-            name = layer + '_' + str(get_layer_uid(layer))
-        self.name = name
-        self.vars = {}
-        logging = kwargs.get('logging', False)
-        self.logging = logging
-        self.sparse_inputs = False
-
-    def _call(self, inputs):
-        return inputs
-
-    def __call__(self, inputs):
-        with tf.name_scope(self.name):
-            if self.logging and not self.sparse_inputs:
-                tf.summary.histogram(self.name + '/inputs', inputs)
-            outputs = self._call(inputs)
-            if self.logging:
-                tf.summary.histogram(self.name + '/outputs', outputs)
-            return outputs
-
-    def _log_vars(self):
-        for var in self.vars:
-            tf.summary.histogram(self.name + '/vars/' + var, self.vars[var])
-
-
-def sparse_dropout(x, keep_prob, noise_shape):
-    """Dropout for sparse tensors."""
-    random_tensor = keep_prob
-    random_tensor += tf.random_uniform(noise_shape)
-    dropout_mask = tf.cast(tf.floor(random_tensor), dtype=tf.bool)
-    pre_out = tf.sparse_retain(x, dropout_mask)
-    return pre_out * (1./keep_prob)
-
-def dot(x, y, sparse=False):
-    """Wrapper for tf.matmul (sparse vs dense)."""
-    if sparse:
-        res = tf.sparse_tensor_dense_matmul(x, y)
-    else:
-        res = tf.matmul(x, y)
-    return res
-
-def glorot(shape, name=None):
-    init_range = np.sqrt(6.0/(shape[0]+shape[1]))
-    initial = tf.random_uniform(shape, minval=-init_range, maxval=init_range, dtype=tf.float32)
-    return tf.Variable(initial, name=name)
-
-
-def zeros(shape, name=None):
-    initial = tf.zeros(shape, dtype=tf.float32)
-    return tf.Variable(initial, name=name)
-
-
-def ones(shape, name=None):
-    initial = tf.ones(shape, dtype=tf.float32)
-    return tf.Variable(initial, name=name)
 
 class GraphConvolution(Layer):
-    def __init__(self, input_dim, output_dim, placeholders, dropout=0.,
-                 sparse_inputs=False, act=tf.nn.relu, bias=False,
-                 featureless=False, **kwargs):
+    def __init__(self, units, support=1,
+                 activation=None,
+                 use_bias=True,
+                 kernel_initializer='glorot_uniform',
+                 bias_initializer='zeros',
+                 kernel_regularizer=None,
+                 bias_regularizer=None,
+                 activity_regularizer=None,
+                 kernel_constraint=None,
+                 bias_constraint=None,
+                 **kwargs):
+        if 'input_shape' not in kwargs and 'input_dim' in kwargs:
+            kwargs['input_shape'] = (kwargs.pop('input_dim'),)
         super(GraphConvolution, self).__init__(**kwargs)
+        self.units = units
+        self.activation = activations.get(activation)
+        self.use_bias = use_bias
+        self.kernel_initializer = initializers.get(kernel_initializer)
+        self.bias_initializer = initializers.get(bias_initializer)
+        self.kernel_regularizer = regularizers.get(kernel_regularizer)
+        self.bias_regularizer = regularizers.get(bias_regularizer)
+        self.activity_regularizer = regularizers.get(activity_regularizer)
+        self.kernel_constraint = constraints.get(kernel_constraint)
+        self.bias_constraint = constraints.get(bias_constraint)
+        self.supports_masking = True
 
-        if dropout:
-            self.dropout = placeholders['dropout']
+        self.support = support
+        assert support >= 1
+
+    def compute_output_shape(self, input_shapes):
+        features_shape = input_shapes[0]
+        output_shape = (features_shape[0], self.units)
+        return output_shape  # (batch_size, output_dim)
+
+    def build(self, input_shapes):
+        features_shape = input_shapes[0]
+        assert len(features_shape) == 2
+        input_dim = features_shape[1]
+
+        self.kernel = self.add_weight(shape=(input_dim * self.support,
+                                             self.units),
+                                      initializer=self.kernel_initializer,
+                                      name='kernel',
+                                      regularizer=self.kernel_regularizer,
+                                      constraint=self.kernel_constraint)
+        if self.use_bias:
+            self.bias = self.add_weight(shape=(self.units,),
+                                        initializer=self.bias_initializer,
+                                        name='bias',
+                                        regularizer=self.bias_regularizer,
+                                        constraint=self.bias_constraint)
         else:
-            self.dropout = 0.
+            self.bias = None
+        self.built = True
 
-        self.act = act
-        self.support = placeholders['support']
-        self.sparse_inputs = sparse_inputs
-        self.featureless = featureless
-        self.bias = bias
+    def call(self, inputs, mask=None):
+        features = inputs[0]
+        basis = inputs[1:]
 
-        # helper variable for sparse dropout
-        self.num_features_nonzero = placeholders['num_features_nonzero']
-
-        with tf.variable_scope(self.name + '_vars'):
-            for i in range(len(self.support)):
-                self.vars['weights_' + str(i)] = glorot([input_dim, output_dim],
-                                                        name='weights_' + str(i))
-            if self.bias:
-                self.vars['bias'] = zeros([output_dim], name='bias')
-
-        if self.logging:
-            self._log_vars()
-
-    def _call(self, inputs):
-        x = inputs
-
-        # dropout
-        if self.sparse_inputs:
-            x = sparse_dropout(x, 1-self.dropout, self.num_features_nonzero)
-        else:
-            x = tf.nn.dropout(x, 1-self.dropout)
-
-        # convolve
         supports = list()
-        for i in range(len(self.support)):
-            if not self.featureless:
-                pre_sup = dot(x, self.vars['weights_' + str(i)],
-                              sparse=self.sparse_inputs)
-            else:
-                pre_sup = self.vars['weights_' + str(i)]
-            support = dot(self.support[i], pre_sup, sparse=True)
-            supports.append(support)
-        output = tf.add_n(supports)
+        for i in range(self.support):
+            supports.append(K.dot(basis[i], features))
+        supports = K.concatenate(supports, axis=1)
+        output = K.dot(supports, self.kernel)
 
-        # bias
         if self.bias:
-            output += self.vars['bias']
-        self.embedding = output #output
-        return self.act(output)
+            output += self.bias
+        return self.activation(output)
+
+    def get_config(self):
+        config = {'units': self.units,
+                  'support': self.support,
+                  'activation': activations.serialize(self.activation),
+                  'use_bias': self.use_bias,
+                  'kernel_initializer': initializers.serialize(
+                      self.kernel_initializer),
+                  'bias_initializer': initializers.serialize(
+                      self.bias_initializer),
+                  'kernel_regularizer': regularizers.serialize(
+                      self.kernel_regularizer),
+                  'bias_regularizer': regularizers.serialize(
+                      self.bias_regularizer),
+                  'activity_regularizer': regularizers.serialize(
+                      self.activity_regularizer),
+                  'kernel_constraint': constraints.serialize(
+                      self.kernel_constraint),
+                  'bias_constraint': constraints.serialize(self.bias_constraint)
+        }
+
+        base_config = super(GraphConvolution, self).get_config()
+        return dict(list(base_config.items()) + list(config.items()))

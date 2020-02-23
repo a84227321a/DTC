@@ -9,8 +9,6 @@ def K_meshgrid(x, y):
 def K_linspace(start, stop, num):
     return tf.linspace(start, stop, num)
 
-
-
 def STN(image, sampling_size=(100, 32)):
     locnet = MaxPool2D(pool_size=(2, 2))(image)
     locnet = Conv2D(20, (5, 5))(locnet)
@@ -33,7 +31,7 @@ def get_initial_weights(output_size):
     return weights
 
 class BilinearInterpolation(Layer):
-    """Performs bilinear interpolation as a keras layer
+    """bilinear interpolation
     """
     def __init__(self, output_size=(100, 32), **kwargs):
         self.output_size = output_size
@@ -81,10 +79,8 @@ class BilinearInterpolation(Layer):
         base = K.repeat_elements(pixels_batch, flat_output_size, axis=1)
         base = K.flatten(base)
 
-        # base_y0 = base + (y0 * width)
         base_y0 = y0 * width
         base_y0 = base + base_y0
-        # base_y1 = base + (y1 * width)
         base_y1 = y1 * width
         base_y1 = base_y1 + base
 
